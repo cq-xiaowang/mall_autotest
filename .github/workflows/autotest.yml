@@ -1,0 +1,134 @@
+name: Mall AutoTest
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    # 每天凌晨2点执行回归测试
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: '测试环境'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - dev
+          - test
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # API接口测试
+  api-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+
+      - name: 运行API测试
+        run: |
+          python run.py --env ${{ github.event.inputs.env || 'test' }} -m api --allure -n 4
+      
+      # 核心修复：v3 → v4
+      - name: 上传Allure报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allure-report
+          path: reports/allure
+          retention-days: 30
+
+      - name: 生成测试摘要
+        if: always()
+        run: |
+          echo "## 测试结果摘要" >> $GITHUB_STEP_SUMMARY
+          echo "- API测试: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # 场景测试
+  scenario-test:
+    runs-on: ubuntu-latest
+    needs: api-test
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 运行场景测试
+        run: |
+          python run.py --env ${{ github.event.inputs.env || 'test' }} -m scenario --html-report
+      
+      # 核心修复：v3 → v4
+      - name: 上传HTML报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scenario-html-report
+          path: reports/html
+          retention-days: 30
+
+  # Docker构建与推送（仅master分支）
+  docker-build:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    needs: [api-test, scenario-test]
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录镜像仓库
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 构建并推送Docker镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/mall-autotest:latest
+            ${{ secrets.DOCKER_REGISTRY }}/mall-autotest:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/mall-autotest:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/mall-autotest:buildcache,mode=max
+
+  # 部署测试（可选）
+  deploy-test:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    needs: docker-build
+    environment: test
+    
+    steps:
+      - name: 部署到测试环境
+        run: |
+          echo "部署Docker容器到测试环境..."
+          # 实际部署命令
