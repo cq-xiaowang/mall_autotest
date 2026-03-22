@@ -33,3 +33,23 @@ test_account:
 timeout:
   request: 10
   page_load: 30
+
+# 阿里云OSS配置（报告存储）
+oss:
+  enabled: false  # 改为true启用OSS上传
+  access_key_id: "your_access_key_id"
+  access_key_secret: "your_access_key_secret"
+  bucket_name: "mall-test-reports"
+  endpoint: "oss-cn-hangzhou.aliyuncs.com"
+  region: "oss-cn-hangzhou"
+  base_path: "test-reports"
+
+# Nginx服务器配置（持久化存储）
+nginx:
+  enabled: false  # 改为true启用Nginx上传
+  host: "your-nginx-server.com"
+  port: 22
+  user: "deploy"
+  password: "your_password"
+  upload_path: "/var/www/html/reports"
+  download_url: "http://your-nginx-server.com/reports"

@@ -6,6 +6,7 @@ import os
 import sys
 import argparse
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -61,6 +62,9 @@ def run_tests(args):
     if args.debug:
         pytest_cmd.extend(['-s', '--tb=long'])
     
+    # 记录测试场景
+    scenario = args.scenario or (args.marker if args.marker else 'full')
+    
     # Allure报告
     if args.allure:
         allure_dir = BASE_DIR / 'reports' / 'allure'
@@ -71,7 +75,9 @@ def run_tests(args):
     if args.html_report:
         report_dir = BASE_DIR / 'reports' / 'html'
         report_dir.mkdir(parents=True, exist_ok=True)
-        report_file = report_dir / f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html'
+        # 按命名规则生成报告文件名: 触发平台+场景+状态+时间
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_file = report_dir / f'{args.trigger}_{scenario}_{timestamp}.html'
         pytest_cmd.extend(['--html', str(report_file), '--self-contained-html'])
     
     # 打印执行命令
@@ -80,7 +86,7 @@ def run_tests(args):
     # 执行测试
     result = subprocess.run(pytest_cmd, cwd=str(BASE_DIR))
     
-    return result.returncode
+    return result.returncode, str(report_file) if args.html_report else None, scenario
 
 
 def run_allure_report():
@@ -98,24 +104,71 @@ def run_allure_report():
     subprocess.run(['allure', 'open', str(allure_dir / 'report')])
 
 
-def upload_report_to_server(report_path: str):
+def upload_report_async(report_path: str, trigger: str, scenario: str, exit_code: int):
     """
-    上传测试报告到服务器
+    异步上传报告到OSS和Nginx
     
     Args:
-        report_path: 报告文件路径
+        report_path: 报告路径
+        trigger: 触发平台
+        scenario: 测试场景
+        exit_code: 执行结果（0成功，非0失败）
+    """
+    # 延迟导入，避免启动时就检查OSS
+    try:
+        from common.oss_uploader import report_uploader
+        from config.config import Config
+        
+        status = 'success' if exit_code == 0 else 'failure'
+        
+        # 上传到OSS
+        if Config.get('oss.enabled', False):
+            print(f"\n[上传] 开始上传报告到OSS...")
+            url = report_uploader.upload_html_report(
+                report_path, 
+                trigger=trigger,
+                scenario=scenario
+            )
+            if url:
+                print(f"[上传] OSS访问地址: {url}")
+        
+        # 上传到Nginx服务器
+        if Config.get('nginx.enabled', False):
+            print(f"\n[上传] 开始上传报告到Nginx服务器...")
+            upload_to_nginx(report_path, trigger, scenario, status)
+            
+    except Exception as e:
+        print(f"[上传] 上传失败: {e}")
+
+
+def upload_to_nginx(report_path: str, trigger: str, scenario: str, status: str):
+    """
+    上传报告到Nginx服务器（SSH方式）
+    
+    Args:
+        report_path: 报告路径
+        trigger: 触发平台
+        scenario: 测试场景
+        status: 执行状态
     """
     import paramiko
     from config.config import Config
     
-    # 获取服务器配置（可以添加到配置文件）
-    server_host = Config.get('report_server.host', 'your-server.com')
-    server_port = Config.get('report_server.port', 22)
-    server_user = Config.get('report_server.user', 'user')
-    server_password = Config.get('report_server.password', 'password')
-    server_path = Config.get('report_server.path', '/var/www/html/reports/')
+    server_host = Config.get('nginx.host', '')
+    server_port = Config.get('nginx.port', 22)
+    server_user = Config.get('nginx.user', '')
+    server_password = Config.get('nginx.password', '')
+    server_path = Config.get('nginx.upload_path', '/var/www/html/reports')
+    
+    if not server_host or not server_user:
+        print("[上传] Nginx服务器配置不完整，跳过上传")
+        return
     
     try:
+        # 生成文件名
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_name = f"{trigger}_{scenario}_{status}_{timestamp}.html"
+        
         # 连接服务器
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -123,17 +176,16 @@ def upload_report_to_server(report_path: str):
         
         # 上传文件
         sftp = ssh.open_sftp()
-        report_name = Path(report_path).name
-        remote_path = f"{server_path}{report_name}"
+        remote_path = f"{server_path}/{report_name}"
         sftp.put(report_path, remote_path)
         
-        print(f"报告已上传: {remote_path}")
+        print(f"[上传] Nginx访问地址: http://{server_host}/reports/{report_name}")
         
         sftp.close()
         ssh.close()
         
     except Exception as e:
-        print(f"上传报告失败: {e}")
+        print(f"[上传] Nginx上传失败: {e}")
 
 
 def main():
@@ -172,9 +224,14 @@ def main():
     parser.add_argument('--open-allure', action='store_true',
                         help='打开Allure报告')
     
-    # 其他选项
+    # 上传选项
     parser.add_argument('--upload', action='store_true',
-                        help='上传报告到服务器')
+                        help='上传报告到OSS和Nginx')
+    parser.add_argument('--trigger', default='manual',
+                        choices=['manual', 'github', 'jenkins', 'api', 'schedule'],
+                        help='触发平台 (default: manual)')
+    parser.add_argument('--scenario', default=None,
+                        help='测试场景名称，用于报告命名')
     
     args = parser.parse_args()
     
@@ -184,15 +241,20 @@ def main():
         return
     
     # 执行测试
-    exit_code = run_tests(args)
+    exit_code, report_path, scenario = run_tests(args)
     
-    # 上传报告
-    if args.upload and args.html_report:
-        # 找到最新的HTML报告
-        report_dir = BASE_DIR / 'reports' / 'html'
-        reports = sorted(report_dir.glob('report_*.html'), reverse=True)
-        if reports:
-            upload_report_to_server(str(reports[0]))
+    # 上传报告（异步，不阻塞测试结果）
+    if args.upload and report_path:
+        # 根据触发平台确定场景名
+        trigger = args.trigger
+        scenario = scenario or args.marker or 'full'
+        
+        # 异步上传
+        upload_thread = threading.Thread(
+            target=upload_report_async,
+            args=(report_path, trigger, scenario, exit_code)
+        )
+        upload_thread.start()
     
     sys.exit(exit_code)
 
