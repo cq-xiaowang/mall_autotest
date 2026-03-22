@@ -1,0 +1,35 @@
+# 商城后台管理系统测试环境配置
+
+# 基础URL配置
+base_url: "http://test-mall-admin.example.com"
+api_prefix: "/api/v1"
+
+# 数据库配置
+database:
+  host: "test-db.example.com"
+  port: 3306
+  user: "test_user"
+  password: "test_pass"
+  database: "mall_admin_test"
+  charset: "utf8mb4"
+
+# Redis配置
+redis:
+  host: "test-redis.example.com"
+  port: 6379
+  password: ""
+  db: 0
+
+# 测试账号
+test_account:
+  admin:
+    username: "admin_test"
+    password: "admin123"
+  user:
+    username: "testuser"
+    password: "test123"
+
+# 超时配置
+timeout:
+  request: 10
+  page_load: 30
